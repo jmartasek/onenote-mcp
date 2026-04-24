@@ -235,21 +235,26 @@ def parse_page_to_markdown(xml_str: str) -> tuple[str, list[ImageRef]]:
 def _build_style_map(root) -> dict[int, str]:
     """Build quickStyleIndex → markdown heading prefix from page QuickStyleDef elements.
 
-    Falls back to _FALLBACK_STYLE_MAP for indices not explicitly defined on the page.
+    Falls back to _FALLBACK_STYLE_MAP only for indices that have no QuickStyleDef
+    definition at all.  If a page explicitly maps an index to a non-heading style
+    (e.g. index 2 → "p"), the fallback will NOT overwrite it with "h2".
     """
     style_map: dict[int, str] = {}
+    defined_indices: set[int] = set()
     for qsd in root.findall(".//one:QuickStyleDef", NS):
         try:
             idx = int(qsd.get("index", "-1"))
         except (ValueError, TypeError):
             continue
-        name = qsd.get("name", "").lower()
-        prefix = _HEADING_PREFIXES.get(name)
-        if idx >= 0 and prefix:
-            style_map[idx] = prefix
-    # Fill in any missing indices from the fallback defaults
+        if idx >= 0:
+            defined_indices.add(idx)
+            name = qsd.get("name", "").lower()
+            prefix = _HEADING_PREFIXES.get(name)
+            if prefix:
+                style_map[idx] = prefix
+    # Apply fallback only for indices that have NO definition on the page
     for idx, name in _FALLBACK_STYLE_MAP.items():
-        if idx not in style_map:
+        if idx not in defined_indices:
             prefix = _HEADING_PREFIXES.get(name)
             if prefix:
                 style_map[idx] = prefix
@@ -333,10 +338,10 @@ def _process_oe(
 
     if text_parts:
         text = "".join(text_parts)
-        if heading_prefix:
-            lines.append(f"{heading_prefix} {text.strip()}")
-        elif list_prefix:
+        if list_prefix:
             lines.append(f"{list_prefix}{text}")
+        elif heading_prefix:
+            lines.append(f"{heading_prefix} {text.strip()}")
         else:
             lines.append(text)
 

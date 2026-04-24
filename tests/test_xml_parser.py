@@ -175,6 +175,39 @@ HEADING_FALLBACK_XML = f"""<?xml version="1.0"?>
 </one:Page>"""
 
 
+REAL_STYLE_XML = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="page-real" name="Real Style Page">
+  <one:QuickStyleDef index="0" name="PageTitle"/>
+  <one:QuickStyleDef index="1" name="h1"/>
+  <one:QuickStyleDef index="2" name="p"/>
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE quickStyleIndex="1">
+        <one:T><![CDATA[Date Heading]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="2">
+        <one:T><![CDATA[Normal topic text]]></one:T>
+        <one:OEChildren>
+          <one:OE quickStyleIndex="2">
+            <one:List><one:Bullet/></one:List>
+            <one:T><![CDATA[A bullet detail]]></one:T>
+            <one:OEChildren>
+              <one:OE quickStyleIndex="2">
+                <one:List><one:Bullet/></one:List>
+                <one:T><![CDATA[Nested bullet]]></one:T>
+              </one:OE>
+            </one:OEChildren>
+          </one:OE>
+        </one:OEChildren>
+      </one:OE>
+      <one:OE quickStyleIndex="2">
+        <one:T><![CDATA[Another plain paragraph]]></one:T>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+
+
 class TestParseNotebooks:
     def test_basic_parsing(self):
         notebooks = parse_notebooks(HIERARCHY_XML)
@@ -323,3 +356,39 @@ class TestFormatting:
 </one:Page>"""
         md, _ = parse_page_to_markdown(xml)
         assert "A & B <tag>" in md
+
+    def test_paragraph_style_not_rendered_as_heading(self):
+        """When QuickStyleDef maps index 2 to 'p', it must NOT become a heading."""
+        md, _ = parse_page_to_markdown(REAL_STYLE_XML)
+        assert "## Date Heading" in md
+        # These are qsi=2 which the page defines as "p" — must be plain text
+        assert "Normal topic text" in md
+        assert "### Normal topic text" not in md
+        assert "Another plain paragraph" in md
+        assert "### Another plain paragraph" not in md
+
+    def test_bullets_under_paragraph(self):
+        """Bullet items nested under a paragraph topic should render as list items."""
+        md, _ = parse_page_to_markdown(REAL_STYLE_XML)
+        assert "- A bullet detail" in md
+        assert "  - Nested bullet" in md
+
+    def test_list_prefix_wins_over_heading(self):
+        """If an OE has both a heading style index AND a List child,
+        the list prefix should take precedence."""
+        ns = NS
+        xml = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{ns}" ID="p" name="ListVsHeading">
+  <one:QuickStyleDef index="1" name="h1"/>
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE quickStyleIndex="1">
+        <one:List><one:Bullet/></one:List>
+        <one:T><![CDATA[Should be bullet not heading]]></one:T>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+        md, _ = parse_page_to_markdown(xml)
+        assert "- Should be bullet not heading" in md
+        assert "## Should be bullet" not in md
