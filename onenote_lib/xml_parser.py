@@ -423,7 +423,7 @@ def _process_oe(
 
     # Tables (direct OE children)
     for table in oe.findall("one:Table", NS):
-        lines.extend(_process_table(table))
+        lines.extend(_process_table(table, tag_map))
 
     # Attached files
     for attached in oe.findall("one:InsertedFile", NS):
@@ -441,24 +441,44 @@ def _process_oe(
     return lines, images, img_counter
 
 
-def _process_table(table_elem) -> list[str]:
+def _process_table_cell(cell, tag_map: dict[int, str]) -> str:
+    """Extract markdown content from a table cell, including tag prefixes.
+
+    Each OE in the cell becomes a separate segment.  Multiple segments
+    are joined with ``<br>`` so they render as line-breaks inside the
+    markdown table cell.
+    """
+    segments: list[str] = []
+    for oe in cell.iter():
+        if _local_tag(oe.tag) != "OE":
+            continue
+        # Only process OE elements that have direct T children (skip wrapper OEs)
+        t_elems = oe.findall("one:T", NS)
+        if not t_elems:
+            continue
+        text_parts = [_html_to_markdown(t.text or "").strip() for t in t_elems]
+        text = " ".join(p for p in text_parts if p)
+        if not text:
+            continue
+        tag_prefix = _build_tag_prefix(oe, tag_map)
+        segments.append(f"{tag_prefix}{text}")
+    cell_text = "<br>".join(segments) if segments else ""
+    return cell_text.replace("|", "\\|")
+
+
+def _process_table(table_elem, tag_map: dict[int, str] | None = None) -> list[str]:
     """Convert a OneNote table to markdown table."""
     rows = table_elem.findall("one:Row", NS)
     if not rows:
         return []
 
+    if tag_map is None:
+        tag_map = {}
+
     md_rows = []
     for row in rows:
         cells = row.findall("one:Cell", NS)
-        cell_texts = []
-        for cell in cells:
-            texts = []
-            for t in cell.iter():
-                if _local_tag(t.tag) == "T" and t.text:
-                    texts.append(_html_to_markdown(t.text).strip())
-            cell_text = " ".join(texts) if texts else ""
-            cell_text = cell_text.replace("|", "\\|")
-            cell_texts.append(cell_text)
+        cell_texts = [_process_table_cell(cell, tag_map) for cell in cells]
         md_rows.append("| " + " | ".join(cell_texts) + " |")
 
     if len(md_rows) >= 1:

@@ -459,3 +459,54 @@ class TestTags:
     def test_tags_with_bullet_list(self):
         md, _ = parse_page_to_markdown(TAGS_XML)
         assert "- [x] ⭐ Starred done bullet" in md
+
+    def test_tags_inside_table_cells(self):
+        ns = NS
+        xml = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{ns}" ID="p" name="TableTags">
+  <one:TagDef index="0" name="To Do" type="0" symbol="3"/>
+  <one:TagDef index="1" name="Important" type="1" symbol="13"/>
+  <one:QuickStyleDef index="0" name="p"/>
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE>
+        <one:Table>
+          <one:Row>
+            <one:Cell><one:OEChildren>
+              <one:OE><one:T><![CDATA[Category]]></one:T></one:OE>
+            </one:OEChildren></one:Cell>
+            <one:Cell><one:OEChildren>
+              <one:OE><one:T><![CDATA[Tasks]]></one:T></one:OE>
+            </one:OEChildren></one:Cell>
+          </one:Row>
+          <one:Row>
+            <one:Cell><one:OEChildren>
+              <one:OE><one:T><![CDATA[Sprint 1]]></one:T></one:OE>
+            </one:OEChildren></one:Cell>
+            <one:Cell><one:OEChildren>
+              <one:OE>
+                <one:Tag index="0" completed="false"/>
+                <one:T><![CDATA[Fix the bug]]></one:T>
+              </one:OE>
+              <one:OE>
+                <one:Tag index="0" completed="true"/>
+                <one:T><![CDATA[Write tests]]></one:T>
+              </one:OE>
+              <one:OE>
+                <one:Tag index="1" completed="true"/>
+                <one:T><![CDATA[Deploy to prod]]></one:T>
+              </one:OE>
+            </one:OEChildren></one:Cell>
+          </one:Row>
+        </one:Table>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+        md, _ = parse_page_to_markdown(xml)
+        # Tags should appear in table cells
+        assert "[ ] Fix the bug" in md
+        assert "[x] Write tests" in md
+        assert "⭐ Deploy to prod" in md
+        # Multiple OEs in one cell should be separated by <br>
+        assert "<br>" in md
