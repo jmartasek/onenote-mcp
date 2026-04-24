@@ -1,11 +1,94 @@
 """Parse OneNote XML into markdown and structured data."""
 
-import re
+from __future__ import annotations
+
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 
 # OneNote 2013 XML namespace
 NS = {"one": "http://schemas.microsoft.com/office/onenote/2013/onenote"}
+
+# Fallback quickStyleIndex → style name when the page has no QuickStyleDef elements.
+# These match the default OneNote heading assignments (0 = normal paragraph).
+_FALLBACK_STYLE_MAP: dict[int, str] = {
+    1: "h1", 2: "h2", 3: "h3", 4: "h4", 5: "h5", 6: "h6",
+}
+
+# Style name → markdown heading prefix.
+# The page title is already rendered as "#", so H1 starts at "##".
+_HEADING_PREFIXES: dict[str, str] = {
+    "h1": "##", "h2": "###", "h3": "####", "h4": "#####", "h5": "######", "h6": "######",
+    "heading 1": "##", "heading 2": "###", "heading 3": "####",
+    "heading 4": "#####", "heading 5": "######", "heading 6": "######",
+}
+
+
+class _MarkdownConverter(HTMLParser):
+    """Convert HTML-like CDATA found in OneNote <T> elements to inline markdown.
+
+    Handles: <b>/<strong> → **…**, <i>/<em> → *…*, monospace <span> → `…`.
+    convert_charrefs=True lets the stdlib handle all HTML entity decoding.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._stack: list[str | None] = []
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        style = dict(attrs).get("style", "")
+        kind = self._classify(tag, style)
+        self._stack.append(kind)
+        if kind == "bold":
+            self._parts.append("**")
+        elif kind == "italic":
+            self._parts.append("*")
+        elif kind == "code":
+            self._parts.append("`")
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._stack:
+            return
+        kind = self._stack.pop()
+        if kind == "bold":
+            self._parts.append("**")
+        elif kind == "italic":
+            self._parts.append("*")
+        elif kind == "code":
+            self._parts.append("`")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def _classify(self, tag: str, style: str) -> str | None:
+        if tag in ("b", "strong"):
+            return "bold"
+        if tag in ("i", "em"):
+            return "italic"
+        if tag == "span":
+            s = style.lower()
+            if "font-weight" in s and "bold" in s:
+                return "bold"
+            if "font-style" in s and "italic" in s:
+                return "italic"
+            if "font-family" in s and any(
+                f in s for f in ("courier", "consolas", "monospace", "lucida console")
+            ):
+                return "code"
+        return None
+
+    def markdown(self) -> str:
+        return "".join(self._parts)
+
+
+def _html_to_markdown(text: str) -> str:
+    """Convert HTML-like content from a OneNote <T> CDATA block to markdown."""
+    if not text:
+        return text
+    conv = _MarkdownConverter()
+    conv.feed(text)
+    return conv.markdown()
 
 
 @dataclass
@@ -123,10 +206,13 @@ def parse_page_to_markdown(xml_str: str) -> tuple[str, list[ImageRef]]:
     images: list[ImageRef] = []
     img_counter = 0
 
+    # Build quickStyleIndex → heading-prefix map from page-level QuickStyleDef elements.
+    style_map = _build_style_map(root)
+
     # Process all Outline elements (main content containers)
     for outline in root.findall(".//one:Outline", NS):
         outline_lines, outline_images, img_counter = _process_outline(
-            outline, images_start_index=img_counter
+            outline, img_counter, style_map
         )
         lines.extend(outline_lines)
         images.extend(outline_images)
@@ -146,38 +232,140 @@ def parse_page_to_markdown(xml_str: str) -> tuple[str, list[ImageRef]]:
     return "\n".join(lines).strip(), images
 
 
-def _process_outline(outline, images_start_index: int = 0) -> tuple[list[str], list[ImageRef], int]:
+def _build_style_map(root) -> dict[int, str]:
+    """Build quickStyleIndex → markdown heading prefix from page QuickStyleDef elements.
+
+    Falls back to _FALLBACK_STYLE_MAP for indices not explicitly defined on the page.
+    """
+    style_map: dict[int, str] = {}
+    for qsd in root.findall(".//one:QuickStyleDef", NS):
+        try:
+            idx = int(qsd.get("index", "-1"))
+        except (ValueError, TypeError):
+            continue
+        name = qsd.get("name", "").lower()
+        prefix = _HEADING_PREFIXES.get(name)
+        if idx >= 0 and prefix:
+            style_map[idx] = prefix
+    # Fill in any missing indices from the fallback defaults
+    for idx, name in _FALLBACK_STYLE_MAP.items():
+        if idx not in style_map:
+            prefix = _HEADING_PREFIXES.get(name)
+            if prefix:
+                style_map[idx] = prefix
+    return style_map
+
+
+def _process_outline(
+    outline, img_counter: int = 0, style_map: dict[int, str] | None = None
+) -> tuple[list[str], list[ImageRef], int]:
     """Process an Outline element into markdown lines."""
-    lines = []
-    images = []
-    img_counter = images_start_index
+    if style_map is None:
+        style_map = {}
+    lines: list[str] = []
+    images: list[ImageRef] = []
 
-    for oe in outline.iter():
-        tag = _local_tag(oe.tag)
+    for oe_children in outline.findall("one:OEChildren", NS):
+        child_lines, child_images, img_counter = _process_oechildren(
+            oe_children, img_counter, style_map, list_depth=0
+        )
+        lines.extend(child_lines)
+        images.extend(child_images)
 
-        if tag == "T":
-            # Text element — extract CDATA content
-            text = oe.text or ""
-            text = _clean_text(text)
-            if text.strip():
-                lines.append(text)
+    return lines, images, img_counter
 
-        elif tag == "Image":
-            cb_id = _get_callback_id(oe)
-            if cb_id:
-                img_counter += 1
-                ref = _make_image_ref(oe, img_counter)
-                if ref:
-                    images.append(ref)
-                    lines.append(f"[Image {ref.index}]")
 
-        elif tag == "Table":
-            table_lines = _process_table(oe)
-            lines.extend(table_lines)
+def _process_oechildren(
+    oe_children, img_counter: int, style_map: dict[int, str], list_depth: int
+) -> tuple[list[str], list[ImageRef], int]:
+    """Process an OEChildren element, iterating over its direct OE children."""
+    lines: list[str] = []
+    images: list[ImageRef] = []
 
-        elif tag == "InsertedFile":
-            name = oe.get("preferredName", "file")
-            lines.append(f"[Attached: {name}]")
+    for oe in oe_children.findall("one:OE", NS):
+        oe_lines, oe_images, img_counter = _process_oe(oe, img_counter, style_map, list_depth)
+        lines.extend(oe_lines)
+        images.extend(oe_images)
+
+    return lines, images, img_counter
+
+
+def _process_oe(
+    oe, img_counter: int, style_map: dict[int, str], list_depth: int
+) -> tuple[list[str], list[ImageRef], int]:
+    """Process a single OE element, applying heading/list style and collecting content."""
+    lines: list[str] = []
+    images: list[ImageRef] = []
+
+    # Heading prefix from quickStyleIndex
+    heading_prefix = ""
+    style_idx_str = oe.get("quickStyleIndex")
+    if style_idx_str is not None:
+        try:
+            heading_prefix = style_map.get(int(style_idx_str), "")
+        except ValueError:
+            pass
+
+    # List prefix from <one:List> child
+    indent = "  " * list_depth
+    list_prefix = ""
+    is_list_item = False
+    list_elem = oe.find("one:List", NS)
+    if list_elem is not None:
+        is_list_item = True
+        if list_elem.find("one:Bullet", NS) is not None:
+            list_prefix = indent + "- "
+        elif list_elem.find("one:Number", NS) is not None:
+            list_prefix = indent + "1. "
+        else:
+            ls = list_elem.get("listStyle", "").lower()
+            if "bullet" in ls:
+                list_prefix = indent + "- "
+            elif ls:
+                list_prefix = indent + "1. "
+
+    # Collect text from direct <one:T> children (multiple T per OE is uncommon but valid)
+    text_parts: list[str] = []
+    for t in oe.findall("one:T", NS):
+        converted = _html_to_markdown(t.text or "")
+        if converted.strip():
+            text_parts.append(converted)
+
+    if text_parts:
+        text = "".join(text_parts)
+        if heading_prefix:
+            lines.append(f"{heading_prefix} {text.strip()}")
+        elif list_prefix:
+            lines.append(f"{list_prefix}{text}")
+        else:
+            lines.append(text)
+
+    # Images (direct OE children)
+    for img_elem in oe.findall("one:Image", NS):
+        cb_id = _get_callback_id(img_elem)
+        if cb_id:
+            img_counter += 1
+            ref = _make_image_ref(img_elem, img_counter)
+            if ref:
+                images.append(ref)
+                lines.append(f"[Image {ref.index}]")
+
+    # Tables (direct OE children)
+    for table in oe.findall("one:Table", NS):
+        lines.extend(_process_table(table))
+
+    # Attached files
+    for attached in oe.findall("one:InsertedFile", NS):
+        lines.append(f"[Attached: {attached.get('preferredName', 'file')}]")
+
+    # Recurse into nested OEChildren; increase list_depth only when inside a list item
+    nested_depth = list_depth + 1 if is_list_item else list_depth
+    for child_oe_children in oe.findall("one:OEChildren", NS):
+        child_lines, child_images, img_counter = _process_oechildren(
+            child_oe_children, img_counter, style_map, nested_depth
+        )
+        lines.extend(child_lines)
+        images.extend(child_images)
 
     return lines, images, img_counter
 
@@ -193,12 +381,13 @@ def _process_table(table_elem) -> list[str]:
         cells = row.findall("one:Cell", NS)
         cell_texts = []
         for cell in cells:
-            # Collect all text in the cell
             texts = []
             for t in cell.iter():
                 if _local_tag(t.tag) == "T" and t.text:
-                    texts.append(_clean_text(t.text).strip())
-            cell_texts.append(" ".join(texts) if texts else "")
+                    texts.append(_html_to_markdown(t.text).strip())
+            cell_text = " ".join(texts) if texts else ""
+            cell_text = cell_text.replace("|", "\\|")
+            cell_texts.append(cell_text)
         md_rows.append("| " + " | ".join(cell_texts) + " |")
 
     if len(md_rows) >= 1:
@@ -255,20 +444,6 @@ def _local_tag(tag: str) -> str:
     if "}" in tag:
         return tag.split("}", 1)[1]
     return tag
-
-
-def _clean_text(text: str) -> str:
-    """Clean OneNote text content (strip HTML-like tags from CDATA)."""
-    # OneNote sometimes wraps text in span tags with styles
-    text = re.sub(r"<[^>]+>", "", text)
-    # Decode common HTML entities
-    text = text.replace("&amp;", "&")
-    text = text.replace("&lt;", "<")
-    text = text.replace("&gt;", ">")
-    text = text.replace("&quot;", '"')
-    text = text.replace("&apos;", "'")
-    text = text.replace("&nbsp;", " ")
-    return text
 
 
 def parse_search_results(xml_str: str) -> list[dict]:

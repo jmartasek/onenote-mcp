@@ -105,6 +105,76 @@ SEARCH_XML = f"""<?xml version="1.0"?>
 </one:Notebooks>"""
 
 
+FORMATTING_XML = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="page-fmt" name="Formatting Page">
+  <one:QuickStyleDef index="1" name="h1"/>
+  <one:QuickStyleDef index="2" name="h2"/>
+  <one:QuickStyleDef index="3" name="h3"/>
+  <one:Title>
+    <one:OE><one:T><![CDATA[Formatting Page]]></one:T></one:OE>
+  </one:Title>
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE quickStyleIndex="1">
+        <one:T><![CDATA[Heading One]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="2">
+        <one:T><![CDATA[Heading Two]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="3">
+        <one:T><![CDATA[Heading Three]]></one:T>
+      </one:OE>
+      <one:OE>
+        <one:T><![CDATA[Normal paragraph with <b>bold</b> and <i>italic</i> text.]]></one:T>
+      </one:OE>
+      <one:OE>
+        <one:T><![CDATA[Inline <span style="font-family:Courier New">code span</span> here.]]></one:T>
+      </one:OE>
+      <one:OE>
+        <one:T><![CDATA[Bold via span: <span style="font-weight:bold;">strong</span>.]]></one:T>
+      </one:OE>
+      <one:OE>
+        <one:List><one:Bullet/></one:List>
+        <one:T><![CDATA[Bullet item one]]></one:T>
+      </one:OE>
+      <one:OE>
+        <one:List><one:Bullet/></one:List>
+        <one:T><![CDATA[Bullet item two]]></one:T>
+        <one:OEChildren>
+          <one:OE>
+            <one:List><one:Bullet/></one:List>
+            <one:T><![CDATA[Nested bullet]]></one:T>
+          </one:OE>
+        </one:OEChildren>
+      </one:OE>
+      <one:OE>
+        <one:List><one:Number/></one:List>
+        <one:T><![CDATA[Numbered item one]]></one:T>
+      </one:OE>
+      <one:OE>
+        <one:List><one:Number/></one:List>
+        <one:T><![CDATA[Numbered item two]]></one:T>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+
+
+HEADING_FALLBACK_XML = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="page-hf" name="Fallback Headings">
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE quickStyleIndex="1">
+        <one:T><![CDATA[Fallback H1]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="2">
+        <one:T><![CDATA[Fallback H2]]></one:T>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+
+
 class TestParseNotebooks:
     def test_basic_parsing(self):
         notebooks = parse_notebooks(HIERARCHY_XML)
@@ -146,7 +216,7 @@ class TestParsePageToMarkdown:
         md, images = parse_page_to_markdown(PAGE_XML)
         assert "# Test Page" in md
         assert "This is paragraph one." in md
-        assert "This is paragraph two with bold text." in md
+        assert "This is paragraph two with **bold** text." in md
         assert "Text after image." in md
 
     def test_image_references(self):
@@ -172,9 +242,9 @@ class TestParsePageToMarkdown:
 
     def test_html_stripping(self):
         md, _ = parse_page_to_markdown(PAGE_XML)
-        # <b> tags should be stripped
+        # HTML tags must not appear raw; bold content must be markdown-formatted
         assert "<b>" not in md
-        assert "bold" in md
+        assert "**bold**" in md
 
 
 class TestParseSearchResults:
@@ -189,3 +259,67 @@ class TestParseSearchResults:
         empty_xml = f'<one:Notebooks xmlns:one="{NS}"/>'
         results = parse_search_results(empty_xml)
         assert len(results) == 0
+
+
+class TestFormatting:
+    def test_headings_from_quick_style_def(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "## Heading One" in md
+        assert "### Heading Two" in md
+        assert "#### Heading Three" in md
+
+    def test_headings_fallback_no_style_def(self):
+        md, _ = parse_page_to_markdown(HEADING_FALLBACK_XML)
+        assert "## Fallback H1" in md
+        assert "### Fallback H2" in md
+
+    def test_bold_tag(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "**bold**" in md
+        assert "<b>" not in md
+
+    def test_italic_tag(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "*italic*" in md
+        assert "<i>" not in md
+
+    def test_inline_code_span(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "`code span`" in md
+
+    def test_bold_via_span_style(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "**strong**" in md
+
+    def test_bullet_list(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "- Bullet item one" in md
+        assert "- Bullet item two" in md
+
+    def test_nested_bullet_list(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "  - Nested bullet" in md
+
+    def test_numbered_list(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "1. Numbered item one" in md
+        assert "1. Numbered item two" in md
+
+    def test_no_raw_html_in_output(self):
+        md, _ = parse_page_to_markdown(FORMATTING_XML)
+        assert "<span" not in md
+        assert "<b>" not in md
+        assert "<i>" not in md
+
+    def test_html_entities_decoded(self):
+        ns = NS
+        xml = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{ns}" ID="p" name="Entities">
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE><one:T><![CDATA[A &amp; B &lt;tag&gt;]]></one:T></one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+        md, _ = parse_page_to_markdown(xml)
+        assert "A & B <tag>" in md
