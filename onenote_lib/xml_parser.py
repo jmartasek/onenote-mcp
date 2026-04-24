@@ -209,10 +209,13 @@ def parse_page_to_markdown(xml_str: str) -> tuple[str, list[ImageRef]]:
     # Build quickStyleIndex → heading-prefix map from page-level QuickStyleDef elements.
     style_map = _build_style_map(root)
 
+    # Build tag index → tag name map from page-level TagDef elements.
+    tag_map = _build_tag_map(root)
+
     # Process all Outline elements (main content containers)
     for outline in root.findall(".//one:Outline", NS):
         outline_lines, outline_images, img_counter = _process_outline(
-            outline, img_counter, style_map
+            outline, img_counter, style_map, tag_map
         )
         lines.extend(outline_lines)
         images.extend(outline_images)
@@ -261,18 +264,74 @@ def _build_style_map(root) -> dict[int, str]:
     return style_map
 
 
+def _build_tag_map(root) -> dict[int, str]:
+    """Build tag index → tag name from page-level TagDef elements.
+
+    OneNote stores tag definitions like:
+        <one:TagDef index="0" name="To Do" type="0" symbol="3"/>
+        <one:TagDef index="1" name="Important" type="1" symbol="13"/>
+    """
+    tag_map: dict[int, str] = {}
+    for td in root.findall(".//one:TagDef", NS):
+        try:
+            idx = int(td.get("index", "-1"))
+        except (ValueError, TypeError):
+            continue
+        name = td.get("name", "")
+        if idx >= 0 and name:
+            tag_map[idx] = name
+    return tag_map
+
+
+# Tag name → markdown prefix.  Checkbox state is handled separately.
+_TAG_EMOJI: dict[str, str] = {
+    "important": "⭐ ",
+    "question": "❓ ",
+}
+
+
+def _build_tag_prefix(oe, tag_map: dict[int, str]) -> str:
+    """Build a combined tag prefix string from all <one:Tag> children on an OE.
+
+    Checkbox tags (To Do) come first, then emoji markers.
+    Example output: ``[ ] ⭐ `` or ``[x] ``.
+    """
+    checkbox = ""
+    markers: list[str] = []
+    for tag_elem in oe.findall("one:Tag", NS):
+        idx_str = tag_elem.get("index")
+        if idx_str is None:
+            continue
+        try:
+            tag_name = tag_map.get(int(idx_str), "")
+        except ValueError:
+            continue
+        completed = tag_elem.get("completed", "false") == "true"
+        name_lower = tag_name.lower()
+        if "to do" in name_lower or name_lower == "todo":
+            checkbox = "[x] " if completed else "[ ] "
+        else:
+            emoji = _TAG_EMOJI.get(name_lower)
+            if emoji:
+                markers.append(emoji)
+    return checkbox + "".join(markers)
+
+
 def _process_outline(
-    outline, img_counter: int = 0, style_map: dict[int, str] | None = None
+    outline, img_counter: int = 0, style_map: dict[int, str] | None = None,
+    tag_map: dict[int, str] | None = None,
 ) -> tuple[list[str], list[ImageRef], int]:
     """Process an Outline element into markdown lines."""
     if style_map is None:
         style_map = {}
+    if tag_map is None:
+        tag_map = {}
     lines: list[str] = []
     images: list[ImageRef] = []
 
     for oe_children in outline.findall("one:OEChildren", NS):
         child_lines, child_images, img_counter = _process_oechildren(
-            oe_children, img_counter, style_map, list_depth=0
+            oe_children, img_counter, style_map, tag_map, list_depth=0
         )
         lines.extend(child_lines)
         images.extend(child_images)
@@ -281,14 +340,17 @@ def _process_outline(
 
 
 def _process_oechildren(
-    oe_children, img_counter: int, style_map: dict[int, str], list_depth: int
+    oe_children, img_counter: int, style_map: dict[int, str],
+    tag_map: dict[int, str], list_depth: int,
 ) -> tuple[list[str], list[ImageRef], int]:
     """Process an OEChildren element, iterating over its direct OE children."""
     lines: list[str] = []
     images: list[ImageRef] = []
 
     for oe in oe_children.findall("one:OE", NS):
-        oe_lines, oe_images, img_counter = _process_oe(oe, img_counter, style_map, list_depth)
+        oe_lines, oe_images, img_counter = _process_oe(
+            oe, img_counter, style_map, tag_map, list_depth
+        )
         lines.extend(oe_lines)
         images.extend(oe_images)
 
@@ -296,9 +358,10 @@ def _process_oechildren(
 
 
 def _process_oe(
-    oe, img_counter: int, style_map: dict[int, str], list_depth: int
+    oe, img_counter: int, style_map: dict[int, str],
+    tag_map: dict[int, str], list_depth: int,
 ) -> tuple[list[str], list[ImageRef], int]:
-    """Process a single OE element, applying heading/list style and collecting content."""
+    """Process a single OE element, applying heading/list/tag style and collecting content."""
     lines: list[str] = []
     images: list[ImageRef] = []
 
@@ -329,6 +392,9 @@ def _process_oe(
             elif ls:
                 list_prefix = indent + "1. "
 
+    # Tag prefixes from <one:Tag> children (To Do, Important, Question, etc.)
+    tag_prefix = _build_tag_prefix(oe, tag_map)
+
     # Collect text from direct <one:T> children (multiple T per OE is uncommon but valid)
     text_parts: list[str] = []
     for t in oe.findall("one:T", NS):
@@ -339,11 +405,11 @@ def _process_oe(
     if text_parts:
         text = "".join(text_parts)
         if list_prefix:
-            lines.append(f"{list_prefix}{text}")
+            lines.append(f"{list_prefix}{tag_prefix}{text}")
         elif heading_prefix:
-            lines.append(f"{heading_prefix} {text.strip()}")
+            lines.append(f"{heading_prefix} {tag_prefix}{text.strip()}")
         else:
-            lines.append(text)
+            lines.append(f"{tag_prefix}{text}")
 
     # Images (direct OE children)
     for img_elem in oe.findall("one:Image", NS):
@@ -367,7 +433,7 @@ def _process_oe(
     nested_depth = list_depth + 1 if is_list_item else list_depth
     for child_oe_children in oe.findall("one:OEChildren", NS):
         child_lines, child_images, img_counter = _process_oechildren(
-            child_oe_children, img_counter, style_map, nested_depth
+            child_oe_children, img_counter, style_map, tag_map, nested_depth
         )
         lines.extend(child_lines)
         images.extend(child_images)

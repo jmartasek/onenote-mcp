@@ -208,6 +208,47 @@ REAL_STYLE_XML = f"""<?xml version="1.0"?>
 </one:Page>"""
 
 
+TAGS_XML = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="page-tags" name="Tagged Page">
+  <one:TagDef index="0" name="To Do" type="0" symbol="3"/>
+  <one:TagDef index="1" name="Important" type="1" symbol="13"/>
+  <one:TagDef index="2" name="Question" type="2" symbol="26"/>
+  <one:QuickStyleDef index="0" name="PageTitle"/>
+  <one:QuickStyleDef index="1" name="p"/>
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="0" completed="false"/>
+        <one:T><![CDATA[Unchecked task]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="0" completed="true"/>
+        <one:T><![CDATA[Completed task]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="1" completed="true"/>
+        <one:T><![CDATA[Important item]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="2" completed="true"/>
+        <one:T><![CDATA[A question]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="0" completed="false"/>
+        <one:Tag index="1" completed="true"/>
+        <one:T><![CDATA[Important unchecked task]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:List><one:Bullet/></one:List>
+        <one:Tag index="0" completed="true"/>
+        <one:Tag index="1" completed="true"/>
+        <one:T><![CDATA[Starred done bullet]]></one:T>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+
+
 class TestParseNotebooks:
     def test_basic_parsing(self):
         notebooks = parse_notebooks(HIERARCHY_XML)
@@ -392,3 +433,29 @@ class TestFormatting:
         md, _ = parse_page_to_markdown(xml)
         assert "- Should be bullet not heading" in md
         assert "## Should be bullet" not in md
+
+
+class TestTags:
+    def test_unchecked_todo(self):
+        md, _ = parse_page_to_markdown(TAGS_XML)
+        assert "[ ] Unchecked task" in md
+
+    def test_checked_todo(self):
+        md, _ = parse_page_to_markdown(TAGS_XML)
+        assert "[x] Completed task" in md
+
+    def test_important_star(self):
+        md, _ = parse_page_to_markdown(TAGS_XML)
+        assert "⭐ Important item" in md
+
+    def test_question_mark(self):
+        md, _ = parse_page_to_markdown(TAGS_XML)
+        assert "❓ A question" in md
+
+    def test_multiple_tags_stacked(self):
+        md, _ = parse_page_to_markdown(TAGS_XML)
+        assert "[ ] ⭐ Important unchecked task" in md
+
+    def test_tags_with_bullet_list(self):
+        md, _ = parse_page_to_markdown(TAGS_XML)
+        assert "- [x] ⭐ Starred done bullet" in md
