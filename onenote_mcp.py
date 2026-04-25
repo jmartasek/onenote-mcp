@@ -190,7 +190,7 @@ def onenote_list_sections(
         path_regex: Regex matched against full logical path (Notebook/Group/.../Section).
         path_exclude_regex: Regex to exclude sections by path (e.g. "Archive").
     """
-    xml = com_client.get_hierarchy(notebook_id, com_client.SECTIONS)
+    xml = com_client.get_hierarchy(notebook_id, com_client.PAGES)
     notebooks = parse_notebooks(xml)
     if not notebooks:
         return json.dumps({"error": "Notebook not found"})
