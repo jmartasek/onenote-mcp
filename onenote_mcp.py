@@ -18,6 +18,9 @@ from onenote_lib.vision import describe_image, describe_images
 from onenote_lib.xml_parser import (
     NotebookInfo,
     SectionGroupInfo,
+    SectionInfo,
+    TaggedItem,
+    extract_tagged_items,
     parse_notebooks,
     parse_page_to_markdown,
     parse_search_results,
@@ -439,6 +442,259 @@ def onenote_search_in_notebook(notebook_id: str, query: str) -> str:
     if not results:
         return json.dumps({"message": "No results found", "query": query, "notebook_id": notebook_id})
     return json.dumps(results, indent=2)
+
+
+# ── Tag Search Tools ─────────────────────────────────────────────────
+
+
+@mcp.tool()
+def onenote_find_tagged_items(
+    path_regex: str = "",
+    path_exclude_regex: str = "",
+    tag_types: str = "",
+    completion: str = "",
+    modified_since: str = "",
+    modified_before: str = "",
+    tag_since: str = "",
+    tag_before: str = "",
+    context_before: int = 0,
+    context_after: int = 0,
+    max_results: int = 200,
+    max_pages: int = 50,
+) -> str:
+    """Find tagged content (todos, important, questions) across notebooks.
+
+    Scans pages matching the path filters, extracts tagged items, and returns
+    a flat list with text, tag metadata, location, and optional context.
+
+    Args:
+        path_regex: Regex on logical path (Notebook/Group/.../Section/Page). Empty=all.
+        path_exclude_regex: Regex to exclude paths (e.g. "Archive").
+        tag_types: Comma-separated tag types to include: todo,important,question. Empty=all.
+        completion: "open" for unchecked todos, "completed" for checked, ""=both.
+            Only applies to To Do tags; Important/Question ignore this filter.
+        modified_since: ISO timestamp — only pages modified on/after this date.
+        modified_before: ISO timestamp — only pages modified on/before this date.
+        tag_since: ISO timestamp — only tags created on/after this date.
+        tag_before: ISO timestamp — only tags created on/before this date.
+        context_before: Number of rendered lines to include before each match.
+        context_after: Number of rendered lines to include after each match.
+        max_results: Maximum tagged items to return (default 200).
+        max_pages: Maximum pages to scan (default 50). Limits COM calls.
+    """
+    # Validate filters
+    try:
+        path_re = re.compile(path_regex) if path_regex else None
+        exclude_re = re.compile(path_exclude_regex) if path_exclude_regex else None
+    except re.error as e:
+        return json.dumps({"error": f"Invalid regex: {e}"})
+
+    try:
+        tag_since_dt = _parse_iso(tag_since) if tag_since else None
+        tag_before_dt = _parse_iso(tag_before) if tag_before else None
+        mod_since_dt = _parse_iso(modified_since) if modified_since else None
+        mod_before_dt = _parse_iso(modified_before) if modified_before else None
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+
+    wanted_types = set()
+    if tag_types:
+        for t in tag_types.split(","):
+            t = t.strip().lower()
+            if t:
+                wanted_types.add(t)
+
+    if completion and completion not in ("open", "completed"):
+        return json.dumps({"error": f"Invalid completion value: {completion!r}. Use 'open', 'completed', or ''."})
+
+    # Collect candidate pages from hierarchy
+    xml = com_client.get_hierarchy("", com_client.PAGES)
+    notebooks = parse_notebooks(xml)
+    candidates = _collect_page_candidates(
+        notebooks, path_re, exclude_re, mod_since_dt, mod_before_dt,
+    )
+
+    items: list[dict] = []
+    scanned = 0
+    truncated = False
+
+    for cand in candidates:
+        if scanned >= max_pages:
+            truncated = True
+            break
+        if len(items) >= max_results:
+            truncated = True
+            break
+
+        scanned += 1
+        try:
+            page_xml = com_client.get_page_content(cand["page_id"])
+        except Exception:
+            continue
+
+        tagged, all_lines = extract_tagged_items(page_xml)
+        for ti in tagged:
+            if len(items) >= max_results:
+                truncated = True
+                break
+
+            # Filter by tag type
+            if wanted_types:
+                if not any(t["type"] in wanted_types for t in ti.tags):
+                    continue
+
+            # Filter by completion (applies only to todo tags)
+            if completion:
+                dominated_by_todo = any(t["type"] == "todo" for t in ti.tags)
+                if dominated_by_todo:
+                    if completion == "open" and not any(
+                        t["type"] == "todo" and not t["completed"] for t in ti.tags
+                    ):
+                        continue
+                    if completion == "completed" and not any(
+                        t["type"] == "todo" and t["completed"] for t in ti.tags
+                    ):
+                        continue
+
+            # Filter by tag creation date
+            if tag_since_dt or tag_before_dt:
+                if not _any_tag_in_range(ti.tags, tag_since_dt, tag_before_dt):
+                    continue
+
+            # Build result entry
+            entry: dict = {
+                "text": ti.text,
+                "tags": ti.tags,
+                "location": {
+                    "page_id": cand["page_id"],
+                    "page_name": cand["page_name"],
+                    "page_modified": cand["page_modified"],
+                    "section": cand["section"],
+                    "notebook": cand["notebook"],
+                    "path": cand["path"],
+                },
+            }
+
+            # Context lines
+            if context_before > 0:
+                start = max(0, ti.line_index - context_before)
+                entry["context_before"] = [
+                    ln for ln in all_lines[start:ti.line_index] if ln.strip()
+                ]
+            if context_after > 0:
+                end = min(len(all_lines), ti.line_index + 1 + context_after)
+                entry["context_after"] = [
+                    ln for ln in all_lines[ti.line_index + 1:end] if ln.strip()
+                ]
+
+            items.append(entry)
+
+    return json.dumps({
+        "items": items,
+        "scanned_pages": scanned,
+        "total_candidates": len(candidates),
+        "truncated": truncated,
+    }, indent=2)
+
+
+def _collect_page_candidates(
+    notebooks: list[NotebookInfo],
+    path_re: re.Pattern | None,
+    exclude_re: re.Pattern | None,
+    mod_since: datetime | None,
+    mod_before: datetime | None,
+) -> list[dict]:
+    """Walk the hierarchy and collect page candidates with their logical paths."""
+    candidates: list[dict] = []
+
+    for nb in notebooks:
+        nb_path = nb.name
+        if exclude_re and exclude_re.search(nb_path):
+            continue
+
+        for sec in nb.sections:
+            sec_path = f"{nb_path}/{sec.name}"
+            if exclude_re and exclude_re.search(sec_path):
+                continue
+            _collect_section_pages(sec, sec_path, nb.name, path_re, exclude_re,
+                                   mod_since, mod_before, candidates)
+
+        for sg in nb.section_groups:
+            _collect_group_pages(sg, nb_path, nb.name, path_re, exclude_re,
+                                 mod_since, mod_before, candidates)
+
+    return candidates
+
+
+def _collect_group_pages(
+    sg: SectionGroupInfo, parent_path: str, nb_name: str,
+    path_re, exclude_re, mod_since, mod_before, candidates: list[dict],
+) -> None:
+    sg_path = f"{parent_path}/{sg.name}"
+    if exclude_re and exclude_re.search(sg_path):
+        return
+    for sec in sg.sections:
+        sec_path = f"{sg_path}/{sec.name}"
+        if exclude_re and exclude_re.search(sec_path):
+            continue
+        _collect_section_pages(sec, sec_path, nb_name, path_re, exclude_re,
+                               mod_since, mod_before, candidates)
+    for child in sg.section_groups:
+        _collect_group_pages(child, sg_path, nb_name, path_re, exclude_re,
+                             mod_since, mod_before, candidates)
+
+
+def _collect_section_pages(
+    sec: SectionInfo, sec_path: str, nb_name: str,
+    path_re, exclude_re, mod_since, mod_before, candidates: list[dict],
+) -> None:
+    for p in sec.pages:
+        page_path = f"{sec_path}/{p.name}"
+        if exclude_re and exclude_re.search(page_path):
+            continue
+        if path_re and not path_re.search(page_path):
+            continue
+        if mod_since or mod_before:
+            if not _ts_in_range_raw(p.last_modified, mod_since, mod_before):
+                continue
+        candidates.append({
+            "page_id": p.id,
+            "page_name": p.name,
+            "page_modified": p.last_modified,
+            "section": sec.name,
+            "notebook": nb_name,
+            "path": page_path,
+        })
+
+
+def _ts_in_range_raw(ts: str | None, since: datetime | None, before: datetime | None) -> bool:
+    """Check timestamp against datetime bounds directly."""
+    if not ts:
+        return False
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    if since and dt < since:
+        return False
+    if before and dt > before:
+        return False
+    return True
+
+
+def _any_tag_in_range(
+    tags: list[dict], since: datetime | None, before: datetime | None,
+) -> bool:
+    """Check if any tag's creationDate falls within the range."""
+    for t in tags:
+        created = t.get("created", "")
+        if not created:
+            continue
+        if _ts_in_range_raw(created, since, before):
+            return True
+    return False
 
 
 # ── Vision Analysis Tools ────────────────────────────────────────────

@@ -375,3 +375,92 @@ class TestFlatListFiltering:
         nb = _make_notebook()
         pages = _find_section_pages(nb.section_groups, "nonexistent")
         assert pages is None
+
+
+# ── Page candidate collection tests ──────────────────────────────────
+
+
+from onenote_mcp import (
+    _collect_page_candidates,
+    _any_tag_in_range,
+    _ts_in_range_raw,
+)
+from datetime import datetime, timezone
+
+
+class TestPageCandidates:
+    def test_collects_all_pages(self):
+        nb = _make_notebook()
+        cands = _collect_page_candidates([nb], None, None, None, None)
+        assert len(cands) == 6
+        names = {c["page_name"] for c in cands}
+        assert names == {"Intro", "Setup", "Standup 2026-04", "Sprint Review",
+                         "Old Notes", "Legacy"}
+
+    def test_path_regex_filters(self):
+        nb = _make_notebook()
+        import re
+        path_re = re.compile("DataOps/Team")
+        cands = _collect_page_candidates([nb], path_re, None, None, None)
+        names = {c["page_name"] for c in cands}
+        assert names == {"Standup 2026-04", "Sprint Review"}
+
+    def test_exclude_regex_prunes(self):
+        nb = _make_notebook()
+        import re
+        exclude_re = re.compile("Archive")
+        cands = _collect_page_candidates([nb], None, exclude_re, None, None)
+        names = {c["page_name"] for c in cands}
+        assert "Old Notes" not in names
+        assert "Legacy" not in names
+        assert "Intro" in names
+
+    def test_modified_since(self):
+        nb = _make_notebook()
+        since = datetime(2026, 4, 18, tzinfo=timezone.utc)
+        cands = _collect_page_candidates([nb], None, None, since, None)
+        names = {c["page_name"] for c in cands}
+        assert "Intro" in names        # Apr 20
+        assert "Setup" not in names     # Apr 15
+        assert "Standup 2026-04" in names  # Apr 24
+
+    def test_candidate_has_location_fields(self):
+        nb = _make_notebook()
+        cands = _collect_page_candidates([nb], None, None, None, None)
+        c = [c for c in cands if c["page_name"] == "Standup 2026-04"][0]
+        assert c["section"] == "Team"
+        assert c["notebook"] == "OneWork"
+        assert "DataOps/Team/Standup 2026-04" in c["path"]
+
+
+class TestTagDateHelpers:
+    def test_ts_in_range_raw_both(self):
+        since = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        before = datetime(2026, 4, 30, tzinfo=timezone.utc)
+        assert _ts_in_range_raw("2026-04-15T10:00:00Z", since, before) is True
+        assert _ts_in_range_raw("2026-05-01T10:00:00Z", since, before) is False
+        assert _ts_in_range_raw("2026-03-15T10:00:00Z", since, before) is False
+
+    def test_ts_in_range_raw_none_ts(self):
+        since = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        assert _ts_in_range_raw(None, since, None) is False
+
+    def test_any_tag_in_range(self):
+        tags = [
+            {"type": "todo", "completed": False, "created": "2026-04-20T10:00:00Z"},
+            {"type": "important", "completed": True, "created": "2026-04-10T08:00:00Z"},
+        ]
+        since = datetime(2026, 4, 15, tzinfo=timezone.utc)
+        assert _any_tag_in_range(tags, since, None) is True
+
+    def test_any_tag_in_range_none_out(self):
+        tags = [
+            {"type": "todo", "completed": False, "created": "2026-04-01T10:00:00Z"},
+        ]
+        since = datetime(2026, 4, 15, tzinfo=timezone.utc)
+        assert _any_tag_in_range(tags, since, None) is False
+
+    def test_any_tag_in_range_missing_created(self):
+        tags = [{"type": "todo", "completed": False, "created": ""}]
+        since = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        assert _any_tag_in_range(tags, since, None) is False

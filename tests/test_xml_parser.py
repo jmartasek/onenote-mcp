@@ -543,3 +543,168 @@ class TestTags:
         assert "⭐ Deploy to prod" in md
         # Multiple OEs in one cell should be separated by <br>
         assert "<br>" in md
+
+
+# ── Tests for extract_tagged_items ───────────────────────────────────
+
+
+from onenote_lib.xml_parser import extract_tagged_items, TaggedItem
+
+
+# XML with creationDate on tags and surrounding context lines
+TAGGED_EXTRACT_XML = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="page-ext" name="Extract Page">
+  <one:TagDef index="0" name="To Do" type="0" symbol="3"/>
+  <one:TagDef index="1" name="Important" type="1" symbol="13"/>
+  <one:TagDef index="2" name="Question" type="2" symbol="26"/>
+  <one:QuickStyleDef index="0" name="PageTitle"/>
+  <one:QuickStyleDef index="1" name="p"/>
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE quickStyleIndex="1">
+        <one:T><![CDATA[Context line before]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="0" completed="false" creationDate="2026-04-20T10:00:00Z"/>
+        <one:T><![CDATA[Open task]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:T><![CDATA[Context line after]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="0" completed="true" creationDate="2026-04-10T08:00:00Z"/>
+        <one:T><![CDATA[Done task]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="1" completed="true" creationDate="2026-04-22T12:00:00Z"/>
+        <one:T><![CDATA[Star item]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="2" completed="true" creationDate="2026-04-15T09:00:00Z"/>
+        <one:T><![CDATA[Question item]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:Tag index="0" completed="false" creationDate="2026-04-18T07:00:00Z"/>
+        <one:Tag index="1" completed="true" creationDate="2026-04-18T07:00:00Z"/>
+        <one:T><![CDATA[Multi-tagged item]]></one:T>
+      </one:OE>
+      <one:OE quickStyleIndex="1">
+        <one:T><![CDATA[Untagged line at end]]></one:T>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+
+
+class TestExtractTaggedItems:
+    def test_extracts_all_tagged(self):
+        items, lines = extract_tagged_items(TAGGED_EXTRACT_XML)
+        assert len(items) == 5
+        texts = [i.text for i in items]
+        assert "Open task" in texts
+        assert "Done task" in texts
+        assert "Star item" in texts
+        assert "Question item" in texts
+        assert "Multi-tagged item" in texts
+
+    def test_untagged_lines_not_included(self):
+        items, _ = extract_tagged_items(TAGGED_EXTRACT_XML)
+        texts = [i.text for i in items]
+        assert "Context line before" not in texts
+        assert "Context line after" not in texts
+        assert "Untagged line at end" not in texts
+
+    def test_tag_types_classified(self):
+        items, _ = extract_tagged_items(TAGGED_EXTRACT_XML)
+        by_text = {i.text: i for i in items}
+        assert by_text["Open task"].tags[0]["type"] == "todo"
+        assert by_text["Star item"].tags[0]["type"] == "important"
+        assert by_text["Question item"].tags[0]["type"] == "question"
+
+    def test_completion_state(self):
+        items, _ = extract_tagged_items(TAGGED_EXTRACT_XML)
+        by_text = {i.text: i for i in items}
+        assert by_text["Open task"].tags[0]["completed"] is False
+        assert by_text["Done task"].tags[0]["completed"] is True
+
+    def test_creation_date_preserved(self):
+        items, _ = extract_tagged_items(TAGGED_EXTRACT_XML)
+        by_text = {i.text: i for i in items}
+        assert by_text["Open task"].tags[0]["created"] == "2026-04-20T10:00:00Z"
+
+    def test_multi_tags(self):
+        items, _ = extract_tagged_items(TAGGED_EXTRACT_XML)
+        by_text = {i.text: i for i in items}
+        multi = by_text["Multi-tagged item"]
+        assert len(multi.tags) == 2
+        types = {t["type"] for t in multi.tags}
+        assert types == {"todo", "important"}
+
+    def test_all_lines_include_everything(self):
+        _, lines = extract_tagged_items(TAGGED_EXTRACT_XML)
+        text = "\n".join(lines)
+        assert "Context line before" in text
+        assert "Context line after" in text
+        assert "Open task" in text
+        assert "Untagged line at end" in text
+
+    def test_line_index_valid(self):
+        items, lines = extract_tagged_items(TAGGED_EXTRACT_XML)
+        for item in items:
+            assert 0 <= item.line_index < len(lines)
+            assert item.text in lines[item.line_index]
+
+    def test_context_window(self):
+        items, lines = extract_tagged_items(TAGGED_EXTRACT_XML)
+        # Open task should be at index 1 (after "Context line before" at 0)
+        open_task = [i for i in items if i.text == "Open task"][0]
+        # Line before should be "Context line before"
+        assert "Context line before" in lines[open_task.line_index - 1]
+        # Line after should be "Context line after"
+        assert "Context line after" in lines[open_task.line_index + 1]
+
+    def test_tags_in_table_extracted(self):
+        """Tags inside table cells are extracted."""
+        ns = NS
+        xml = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{ns}" ID="p" name="TableExtract">
+  <one:TagDef index="0" name="To Do" type="0" symbol="3"/>
+  <one:QuickStyleDef index="0" name="p"/>
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE>
+        <one:Table>
+          <one:Row>
+            <one:Cell><one:OEChildren>
+              <one:OE><one:T><![CDATA[Header]]></one:T></one:OE>
+            </one:OEChildren></one:Cell>
+          </one:Row>
+          <one:Row>
+            <one:Cell><one:OEChildren>
+              <one:OE>
+                <one:Tag index="0" completed="false" creationDate="2026-04-20T10:00:00Z"/>
+                <one:T><![CDATA[Table task]]></one:T>
+              </one:OE>
+            </one:OEChildren></one:Cell>
+          </one:Row>
+        </one:Table>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+        items, _ = extract_tagged_items(xml)
+        texts = [i.text for i in items]
+        assert "Table task" in texts
+
+    def test_no_tags_returns_empty(self):
+        xml = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="p" name="NoTags">
+  <one:Outline>
+    <one:OEChildren>
+      <one:OE><one:T><![CDATA[Just text]]></one:T></one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>"""
+        items, lines = extract_tagged_items(xml)
+        assert len(items) == 0
+        assert len(lines) > 0

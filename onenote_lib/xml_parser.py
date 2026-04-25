@@ -596,3 +596,209 @@ def parse_search_results(xml_str: str) -> list[dict]:
                 })
 
     return results
+
+
+# ── Tagged-item extraction ───────────────────────────────────────────
+
+
+@dataclass
+class TaggedItem:
+    """A single tagged item extracted from a page."""
+    text: str
+    tags: list[dict]       # [{"type": "todo", "completed": False, "created": "..."}]
+    line_index: int        # position in rendered lines (for context)
+
+
+def extract_tagged_items(xml_str: str) -> tuple[list[TaggedItem], list[str]]:
+    """Extract all tagged OE items from a page, plus the full rendered line list.
+
+    Returns:
+        (tagged_items, all_lines) — tagged items with their positions, and
+        the complete rendered-line list for context lookups.
+    """
+    root = ET.fromstring(xml_str)
+    style_map = _build_style_map(root)
+    tag_map = _build_tag_map(root)
+
+    # Render all lines (reuse existing traversal) to get positional context.
+    all_lines: list[str] = []
+    # Track which line indices correspond to tagged items.
+    tagged_items: list[TaggedItem] = []
+
+    for outline in root.findall(".//one:Outline", NS):
+        _extract_from_outline(outline, style_map, tag_map, all_lines, tagged_items)
+        all_lines.append("")  # blank between outlines
+
+    return tagged_items, all_lines
+
+
+def _extract_from_outline(
+    outline, style_map: dict, tag_map: dict,
+    all_lines: list[str], tagged_items: list[TaggedItem],
+) -> None:
+    for oe_children in outline.findall("one:OEChildren", NS):
+        _extract_from_oechildren(
+            oe_children, style_map, tag_map, all_lines, tagged_items, list_depth=0,
+        )
+
+
+def _extract_from_oechildren(
+    oe_children, style_map: dict, tag_map: dict,
+    all_lines: list[str], tagged_items: list[TaggedItem], list_depth: int,
+) -> None:
+    for oe in oe_children.findall("one:OE", NS):
+        _extract_from_oe(oe, style_map, tag_map, all_lines, tagged_items, list_depth)
+
+
+def _extract_from_oe(
+    oe, style_map: dict, tag_map: dict,
+    all_lines: list[str], tagged_items: list[TaggedItem], list_depth: int,
+) -> None:
+    """Process an OE: render its line(s) and, if tagged, record a TaggedItem."""
+    # Heading prefix
+    heading_prefix = ""
+    style_idx_str = oe.get("quickStyleIndex")
+    if style_idx_str is not None:
+        try:
+            heading_prefix = style_map.get(int(style_idx_str), "")
+        except ValueError:
+            pass
+
+    # List prefix
+    indent = "  " * list_depth
+    list_prefix = ""
+    is_list_item = False
+    list_elem = oe.find("one:List", NS)
+    if list_elem is not None:
+        is_list_item = True
+        if list_elem.find("one:Bullet", NS) is not None:
+            list_prefix = indent + "- "
+        elif list_elem.find("one:Number", NS) is not None:
+            list_prefix = indent + "1. "
+
+    # Tag analysis
+    tag_prefix = _build_tag_prefix(oe, tag_map)
+    tag_entries: list[dict] = []
+    for tag_elem in oe.findall("one:Tag", NS):
+        idx_str = tag_elem.get("index")
+        if idx_str is None:
+            continue
+        try:
+            tag_name = tag_map.get(int(idx_str), "")
+        except ValueError:
+            continue
+        if not tag_name:
+            continue
+        completed = tag_elem.get("completed", "false") == "true"
+        created = tag_elem.get("creationDate", "")
+        name_lower = tag_name.lower()
+        if "to do" in name_lower or name_lower == "todo":
+            tag_type = "todo"
+        elif name_lower == "important":
+            tag_type = "important"
+        elif name_lower == "question":
+            tag_type = "question"
+        else:
+            tag_type = name_lower
+        tag_entries.append({
+            "type": tag_type,
+            "completed": completed,
+            "created": created,
+        })
+
+    # Collect text
+    text_parts: list[str] = []
+    for t in oe.findall("one:T", NS):
+        converted = _html_to_markdown(t.text or "")
+        if converted.strip():
+            text_parts.append(converted)
+
+    if text_parts:
+        text = "".join(text_parts)
+        if list_prefix:
+            rendered = f"{list_prefix}{tag_prefix}{text}"
+        elif heading_prefix:
+            rendered = f"{heading_prefix} {tag_prefix}{text.strip()}"
+        else:
+            rendered = f"{tag_prefix}{text}"
+
+        line_idx = len(all_lines)
+        all_lines.append(rendered)
+
+        if tag_entries:
+            tagged_items.append(TaggedItem(
+                text=text.strip(),
+                tags=tag_entries,
+                line_index=line_idx,
+            ))
+
+    # Table lines
+    for table in oe.findall("one:Table", NS):
+        table_lines = _process_table(table, tag_map)
+        # Scan table cells for tagged items within table OEs
+        _extract_tags_from_table(table, tag_map, all_lines, tagged_items)
+        all_lines.extend(table_lines)
+
+    # Recurse into nested OEChildren
+    nested_depth = list_depth + 1 if is_list_item else list_depth
+    for child_oe_children in oe.findall("one:OEChildren", NS):
+        _extract_from_oechildren(
+            child_oe_children, style_map, tag_map,
+            all_lines, tagged_items, nested_depth,
+        )
+
+
+def _extract_tags_from_table(
+    table_elem, tag_map: dict,
+    all_lines: list[str], tagged_items: list[TaggedItem],
+) -> None:
+    """Extract tagged items from OE elements inside table cells."""
+    for cell in table_elem.iter():
+        if _local_tag(cell.tag) != "Cell":
+            continue
+        for oe in cell.iter():
+            if _local_tag(oe.tag) != "OE":
+                continue
+            t_elems = oe.findall("one:T", NS)
+            if not t_elems:
+                continue
+            tag_entries: list[dict] = []
+            for tag_elem in oe.findall("one:Tag", NS):
+                idx_str = tag_elem.get("index")
+                if idx_str is None:
+                    continue
+                try:
+                    tag_name = tag_map.get(int(idx_str), "")
+                except ValueError:
+                    continue
+                if not tag_name:
+                    continue
+                completed = tag_elem.get("completed", "false") == "true"
+                created = tag_elem.get("creationDate", "")
+                name_lower = tag_name.lower()
+                if "to do" in name_lower or name_lower == "todo":
+                    tag_type = "todo"
+                elif name_lower == "important":
+                    tag_type = "important"
+                elif name_lower == "question":
+                    tag_type = "question"
+                else:
+                    tag_type = name_lower
+                tag_entries.append({
+                    "type": tag_type,
+                    "completed": completed,
+                    "created": created,
+                })
+            if not tag_entries:
+                continue
+            text_parts = [_html_to_markdown(t.text or "").strip() for t in t_elems]
+            text = " ".join(p for p in text_parts if p)
+            if text:
+                line_idx = len(all_lines)
+                tag_prefix = _build_tag_prefix(oe, tag_map)
+                all_lines.append(f"{tag_prefix}{text}")
+                tagged_items.append(TaggedItem(
+                    text=text,
+                    tags=tag_entries,
+                    line_index=line_idx,
+                ))
