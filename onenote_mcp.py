@@ -460,12 +460,16 @@ def onenote_find_tagged_items(
     context_before: int = 0,
     context_after: int = 0,
     max_results: int = 200,
-    max_pages: int = 50,
+    max_pages: int = 200,
 ) -> str:
     """Find tagged content (todos, important, questions) across notebooks.
 
     Scans pages matching the path filters, extracts tagged items, and returns
     a flat list with text, tag metadata, location, and optional context.
+
+    Returns an envelope: {items, scanned_pages, total_pages, results_truncated,
+    pages_truncated}. ``total_pages`` is the number of pages that matched
+    path / date filters *before* the ``max_pages`` cap was applied.
 
     Args:
         path_regex: Regex on logical path (Notebook/Group/.../Section/Page). Empty=all.
@@ -473,14 +477,19 @@ def onenote_find_tagged_items(
         tag_types: Comma-separated tag types to include: todo,important,question. Empty=all.
         completion: "open" for unchecked todos, "completed" for checked, ""=both.
             Only applies to To Do tags; Important/Question ignore this filter.
-        modified_since: ISO timestamp — only pages modified on/after this date.
+        modified_since: ISO timestamp — filters which *pages* are scanned based on
+            page last-modified time.  Does NOT filter individual tag creation
+            times — use ``tag_since``/``tag_before`` for that.  Combine both to
+            scope "recently active pages with recently created tags".
         modified_before: ISO timestamp — only pages modified on/before this date.
-        tag_since: ISO timestamp — only tags created on/after this date.
-        tag_before: ISO timestamp — only tags created on/before this date.
+        tag_since: ISO timestamp — only tags whose creationDate is on/after this date.
+        tag_before: ISO timestamp — only tags whose creationDate is on/before this date.
         context_before: Number of rendered lines to include before each match.
         context_after: Number of rendered lines to include after each match.
         max_results: Maximum tagged items to return (default 200).
-        max_pages: Maximum pages to scan (default 50). Limits COM calls.
+        max_pages: Maximum pages to fetch content for (default 200). Each page
+            requires a COM call, so this caps latency.  Set higher for
+            exhaustive scans; lower for quick lookups.
     """
     # Validate filters
     try:
@@ -516,14 +525,14 @@ def onenote_find_tagged_items(
 
     items: list[dict] = []
     scanned = 0
-    truncated = False
+    results_truncated = False
+    pages_truncated = len(candidates) > max_pages
 
     for cand in candidates:
         if scanned >= max_pages:
-            truncated = True
             break
         if len(items) >= max_results:
-            truncated = True
+            results_truncated = True
             break
 
         scanned += 1
@@ -535,7 +544,7 @@ def onenote_find_tagged_items(
         tagged, all_lines = extract_tagged_items(page_xml)
         for ti in tagged:
             if len(items) >= max_results:
-                truncated = True
+                results_truncated = True
                 break
 
             # Filter by tag type
@@ -592,8 +601,9 @@ def onenote_find_tagged_items(
     return json.dumps({
         "items": items,
         "scanned_pages": scanned,
-        "total_candidates": len(candidates),
-        "truncated": truncated,
+        "total_pages": len(candidates),
+        "results_truncated": results_truncated,
+        "pages_truncated": pages_truncated,
     }, indent=2)
 
 
