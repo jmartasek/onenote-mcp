@@ -284,6 +284,39 @@ class TestParseNotebooks:
         sg = notebooks[0].section_groups[0]
         assert sg.sections[0].pages[0].name == "Archived Page"
 
+    def test_notebook_scoped_xml(self):
+        """When root is a Notebook element (ID-scoped hierarchy call)."""
+        xml = f"""<?xml version="1.0"?>
+<one:Notebook xmlns:one="{NS}" name="Work Notes" ID="nb-001">
+  <one:Section name="Meeting Notes" ID="sec-001">
+    <one:Page ID="page-001" name="Standup" pageLevel="0"/>
+  </one:Section>
+</one:Notebook>"""
+        notebooks = parse_notebooks(xml)
+        assert len(notebooks) == 1
+        assert notebooks[0].name == "Work Notes"
+        assert notebooks[0].id == "nb-001"
+        assert len(notebooks[0].sections) == 1
+        assert notebooks[0].sections[0].name == "Meeting Notes"
+        assert len(notebooks[0].sections[0].pages) == 1
+
+    def test_section_scoped_xml(self):
+        """When root is a Section element (section-ID-scoped hierarchy call)."""
+        xml = f"""<?xml version="1.0"?>
+<one:Section xmlns:one="{NS}" name="Meeting Notes" ID="sec-001">
+  <one:Page ID="page-001" name="Standup" pageLevel="0"/>
+  <one:Page ID="page-002" name="Sprint Review" pageLevel="0"/>
+</one:Section>"""
+        notebooks = parse_notebooks(xml)
+        assert len(notebooks) == 1
+        nb = notebooks[0]
+        assert len(nb.sections) == 1
+        sec = nb.sections[0]
+        assert sec.id == "sec-001"
+        assert sec.name == "Meeting Notes"
+        assert len(sec.pages) == 2
+        assert sec.pages[0].name == "Standup"
+
 
 class TestParsePageToMarkdown:
     def test_basic_content(self):

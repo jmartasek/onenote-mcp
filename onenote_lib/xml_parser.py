@@ -140,20 +140,60 @@ class NotebookInfo:
 
 
 def parse_notebooks(xml_str: str) -> list[NotebookInfo]:
-    """Parse hierarchy XML into notebook list."""
+    """Parse hierarchy XML into notebook list.
+
+    Handles both unscoped XML (root is Notebooks with Notebook children)
+    and ID-scoped XML (root IS the Notebook/Section element itself).
+    """
     root = ET.fromstring(xml_str)
+    tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
     notebooks = []
-    for nb in root.findall("one:Notebook", NS):
-        notebook = NotebookInfo(
-            id=nb.get("ID", ""),
-            name=nb.get("name", ""),
-            path=nb.get("path"),
-            last_modified=nb.get("lastModifiedTime"),
-        )
-        notebook.sections = _parse_sections(nb)
-        notebook.section_groups = _parse_section_groups(nb)
-        notebooks.append(notebook)
+
+    if tag == "Notebook":
+        # Scoped to a specific notebook — root IS the notebook
+        notebooks.append(_parse_notebook_elem(root))
+    elif tag == "Section":
+        # Scoped to a specific section — wrap in a dummy notebook
+        section = _parse_section_elem(root)
+        nb = NotebookInfo(id="", name="")
+        nb.sections = [section]
+        notebooks.append(nb)
+    else:
+        # Unscoped — root is Notebooks or similar container
+        for nb_elem in root.findall("one:Notebook", NS):
+            notebooks.append(_parse_notebook_elem(nb_elem))
+
     return notebooks
+
+
+def _parse_notebook_elem(nb_elem) -> NotebookInfo:
+    """Parse a single Notebook element into NotebookInfo."""
+    notebook = NotebookInfo(
+        id=nb_elem.get("ID", ""),
+        name=nb_elem.get("name", ""),
+        path=nb_elem.get("path"),
+        last_modified=nb_elem.get("lastModifiedTime"),
+    )
+    notebook.sections = _parse_sections(nb_elem)
+    notebook.section_groups = _parse_section_groups(nb_elem)
+    return notebook
+
+
+def _parse_section_elem(sec_elem) -> SectionInfo:
+    """Parse a single Section element (when it's the root) into SectionInfo."""
+    section = SectionInfo(
+        id=sec_elem.get("ID", ""),
+        name=sec_elem.get("name", ""),
+        path=sec_elem.get("path"),
+    )
+    for page in sec_elem.findall("one:Page", NS):
+        section.pages.append(PageInfo(
+            id=page.get("ID", ""),
+            name=page.get("name", ""),
+            last_modified=page.get("lastModifiedTime"),
+            level=int(page.get("pageLevel", "0")),
+        ))
+    return section
 
 
 def _parse_sections(parent) -> list[SectionInfo]:
