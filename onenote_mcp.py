@@ -420,5 +420,9 @@ def _section_group_to_tree(sg: SectionGroupInfo) -> dict:
     return tree
 
 
-if __name__ == "__main__":
+def main():
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
